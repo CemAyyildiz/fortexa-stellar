@@ -2,6 +2,14 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+function parseWalletFromEmail(email: string | null | undefined) {
+  if (!email?.startsWith("wallet:")) {
+    return null;
+  }
+
+  return email.slice("wallet:".length);
+}
+
 type SessionPayload = {
   authenticated?: boolean;
   user?: {
@@ -69,7 +77,7 @@ export function useAuthSession() {
         setAuthenticated(true);
         setEmail(payload.user.email ?? null);
         setRole(payload.user.role);
-        setWallet(getWalletFromSession(payload.user));
+        setWallet(parseWalletFromEmail(payload.user.email));
 
         const now = Math.floor(Date.now() / 1000);
         const exp = payload.user.exp ?? 0;
@@ -91,7 +99,7 @@ export function useAuthSession() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- initial session refresh on mount
