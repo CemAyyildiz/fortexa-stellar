@@ -6,6 +6,8 @@ import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logInfo, logWarn } from "@/lib/observability/logger";
 import { getUserWallet } from "@/lib/storage/user-wallet-store";
 import { isLoginLocked, readClientIp } from "@/lib/auth/login-lockout";
+import { setSessionCookie } from "@/lib/auth/session-cookie";
+import { applySecurityHeaders } from "@/lib/security/headers";
 
 export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
@@ -15,7 +17,10 @@ export async function POST(request: NextRequest) {
 
   if (!auth.ok) {
     logWarn("Auth refresh unauthorized", context);
-    return auth.response;
+    return applySecurityHeaders(
+      auth.response,
+      request.headers.get("x-request-id") ?? crypto.randomUUID(),
+    );
   }
 
   const clientIp = readClientIp(request.headers);
@@ -70,13 +75,12 @@ export async function POST(request: NextRequest) {
     noStore: true,
   });
 
-  setSessionCookie(response, rotated.token);
+  setSessionCookie(response, token);
 
   logInfo("Auth refresh success", {
     ...context,
     userId: auth.session.userId,
     role: auth.session.role,
-    generation: rotated.generation,
   });
 
   return response;

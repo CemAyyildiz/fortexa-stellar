@@ -3,13 +3,17 @@ import { NextRequest } from "next/server";
 
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
 import {
-  clearLoginLockout,
-  recordLoginFailure,
-  setLoginLockout,
-  LOGKED_OUT.ERROR_CODE,
+  registerLoginFailure,
+  resetLoginLockoutClock,
+  resetLoginLockoutStore,
+  setLoginLockoutClock,
 } from "@/lib/auth/login-lockout";
 import { POST } from "@/app/api/auth/refresh/route";
 import { upsertUserWallet } from "@/lib/storage/user-wallet-store";
+import { buildSecurityHeaders } from "@/lib/security/headers";
+
+const WALLET = "GCDEFAULTTESTWALLET123";
+const CLIENT_IP = "203.0.113.10";
 
 function operatorCookie() {
   process.env.FORTEXA_AUTH_SECRET = "integration-test-secret";
@@ -17,20 +21,31 @@ function operatorCookie() {
     email: "operator@fortexa.local",
     role: "operator",
     userId: "refresh-operator",
-    publicKey: "GCDEFAULTTESTWALLET123",
+    publicKey: WALLET,
     expiresInSeconds: 120,
   });
 
   return `${AUTH_COOKIE_KEY}=${token}`;
 }
 
+function refreshRequest() {
+  return new NextRequest("http://localhost/api/auth/refresh", {
+    method: "POST",
+    headers: { cookie: operatorCookie(), "x-forwarded-for": CLIENT_IP },
+  });
+}
+
 describe("/api/auth/refresh route", () => {
-  beforeEach(() => {
-    clearLoginLockout();
+  beforeEach(async () => {
+    process.env.FORTEXA_AUTH_MAX_ATTEMPTS = "1";
+    process.env.FORTEXA_AUTH_LOCK_MINUTES = "1";
+    resetLoginLockoutClock();
+    await resetLoginLockoutStore();
   });
 
-  afterEach(() => {
-    clearLoginLockout();
+  afterEach(async () => {
+    resetLoginLockoutClock();
+    await resetLoginLockoutStore();
   });
 
   it("returns 401 when unauthenticated", async () => {
@@ -44,13 +59,8 @@ describe("/api/auth/refresh route", () => {
   });
 
   it("returns 200 and rotates for authenticated user", async () => {
-    await upsertUserWallet("refresh-operator", { publicKey: "GCDEFAULTTESTWALLET123", source: "external" });
-    const request = new NextRequest("http://localhost/api/auth/refresh", {
-      method: "POST",
-      headers: { cookie: operatorCookie() },
-    });
-
-    const response = await POST(request);
+    await upsertUserWallet("refresh-operator", { publicKey: WALLET, source: "external" });
+    const response = await POST(refreshRequest());
     expect(response.status).toBe(200);
 
     const payload = (await response.json()) as {
@@ -69,49 +79,28 @@ describe("/api/auth/refresh route", () => {
   });
 
   it("does not issue a session while the account is locked out", async () => {
-    const now = new Date("2024-01-01T00:00:00.000Z");
-    const clock = () => now;
+    await upsertUserWallet("refresh-operator", { publicKey: WALLET, source: "external" });
+    const start = Date.parse("2024-01-01T00:00:00.000Z");
+    setLoginLockoutClock(() => start);
+    await registerLoginFailure(WALLET, CLIENT_IP);
 
-    for (let i = 0; i < LOGKED_OUT.MAX_FAILED; i++) {
-      recordLoginFailure("refresh-operator", clock);
-    }
+    const response = await POST(refreshRequest());
+    expect(response.status).toBe(401);
 
-    const request = new NextRequest("http://localhost/api/auth/refresh", {
-      method: "POST",
-      headers: { cookie: operatorCookie() },
-    });
-
-    const response = await POST(request);
-    expect(response.status).toBe(200);
-
-    const payload = (await response.json()) as {
-      ok: boolean;
-      error?: string;
-      user?: { userId: string; role: string };
-    };
-
-    expect(payload.ok).toBe(false);
-    expect(payload.error).toBe(LOGKED_OUT.ERROR_CODE);
-    expect(payload.user).toBeUndefined();
+    const payload = (await response.json()) as { error?: string; ok?: boolean };
+    expect(payload.ok).toBeUndefined();
+    expect(payload.error).toMatch(/locked/i);
+    expect(response.cookies.get(AUTH_COOKIE_KEY)).toBeUndefined();
   });
 
   it("issues a session again after the lock expires", async () => {
-    const lockedAt = new Date("2024-01-01T00:00:00.000Z");
-    const lockedClock = () => lockedAt;
+    await upsertUserWallet("refresh-operator", { publicKey: WALLET, source: "external" });
+    const start = Date.parse("2024-01-01T00:00:00.000Z");
+    setLoginLockoutClock(() => start);
+    await registerLoginFailure(WALLET, CLIENT_IP);
 
-    setLoginLockout("refresh-operator", lockedClock);
-
-    const expiredAt = new Date(
-      lockedAt.getTime() + LOGKED_OUT.LOCK_DURATION_MS + 1000,
-    );
-    const expiredClock = () => expiredAt;
-
-    const request = new NextRequest("http://localhost/api/auth/refresh", {
-      method: "POST",
-      headers: { cookie: operatorCookie() },
-    });
-
-    const response = await POST(request, { clock: expiredClock });
+    setLoginLockoutClock(() => start + 60_000 + 1000);
+    const response = await POST(refreshRequest());
     expect(response.status).toBe(200);
 
     const payload = (await response.json()) as {

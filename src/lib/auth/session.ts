@@ -2,6 +2,8 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 import type { NextRequest } from "next/server";
 
+import { isSessionGenerationCurrent, registerSession, rotateSessionGeneration } from "@/lib/auth/session-store";
+
 export type AuthRole = "operator" | "signer" | "viewer";
 
 export type AuthSession = {
@@ -14,13 +16,27 @@ export type AuthSession = {
    */
   sid: string;
   exp: number;
+  gen: number;
   publicKey?: string;
+};
+
+export type VerifySessionTokenOptions = {
+  allowStaleGeneration?: boolean;
 };
 
 export const AUTH_COOKIE_KEY = "fortexa_session";
 
 /** Longest lifetime any session token is issued with. */
 export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
+export const DEFAULT_SESSION_TTL_SECONDS = SESSION_MAX_AGE_SECONDS;
+
+function normalizeGeneration(value: unknown) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function normalizeSessionId(value: unknown) {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
 
 function getAuthSecret() {
   const secret = process.env.FORTEXA_AUTH_SECRET?.trim();
@@ -44,14 +60,24 @@ function sign(payloadPart: string) {
   return createHmac("sha256", getAuthSecret()).update(payloadPart).digest("base64url");
 }
 
-export function createSessionToken(input: { email: string; role: AuthRole; userId?: string; expiresInSeconds?: number; publicKey?: string }) {
+export function createSessionToken(input: {
+  email: string;
+  role: AuthRole;
+  userId?: string;
+  expiresInSeconds?: number;
+  publicKey?: string;
+  generation?: number;
+  sessionId?: string;
+}) {
   const now = Math.floor(Date.now() / 1000);
   const payload: AuthSession = {
     userId: input.userId ?? randomUUID(),
     email: input.email,
     role: input.role,
-    exp: now + (input.expiresInSeconds ?? 60 * 60 * 24 * 7),
+    exp: now + (input.expiresInSeconds ?? DEFAULT_SESSION_TTL_SECONDS),
     publicKey: input.publicKey,
+    gen: normalizeGeneration(input.generation),
+    sid: input.sessionId && input.sessionId.length > 0 ? input.sessionId : randomUUID(),
   };
 
   const payloadPart = encodeBase64Url(JSON.stringify(payload));
@@ -111,13 +137,19 @@ export function verifySessionToken(token: string, options?: VerifySessionTokenOp
       return null;
     }
 
+    const sessionId = normalizeSessionId(parsed.sid);
+    if (!sessionId) {
+      return null;
+    }
+
     const session: AuthSession = {
       userId: parsed.userId,
       email: parsed.email,
       role: parsed.role,
       exp: parsed.exp,
       gen: normalizeGeneration(parsed.gen),
-      sid: normalizeSessionId(parsed.sid),
+      sid: sessionId,
+      publicKey: typeof parsed.publicKey === "string" ? parsed.publicKey : undefined,
     };
 
     if (!options?.allowStaleGeneration) {
