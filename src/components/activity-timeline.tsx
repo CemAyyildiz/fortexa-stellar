@@ -1,5 +1,9 @@
 'use client';
 
+import { Clock4, ScrollText } from "lucide-react";
+
+import { DecisionBadge } from "@/components/decision-badge";
+import { Card, CardContent } from "@/components/ui/card";
 import type { AuditEntry } from "@/lib/types/domain";
 
 export function ActivityTimeline({
